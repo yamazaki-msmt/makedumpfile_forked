@@ -280,8 +280,7 @@ isSlab(unsigned long flags, unsigned int _mapcount)
 {
 	/* Linux 6.10 and later */
 	if (NUMBER(PAGE_SLAB_MAPCOUNT_VALUE) != NOT_FOUND_NUMBER) {
-		unsigned int PG_slab = ~NUMBER(PAGE_SLAB_MAPCOUNT_VALUE);
-		if ((_mapcount & (PAGE_TYPE_BASE | PG_slab)) == PAGE_TYPE_BASE)
+		if (_mapcount == (int)NUMBER(PAGE_SLAB_MAPCOUNT_VALUE))
 			return TRUE;
 	}
 
@@ -2534,6 +2533,8 @@ write_vmcoreinfo_data(void)
 	WRITE_NUMBER("PAGE_BUDDY_MAPCOUNT_VALUE", PAGE_BUDDY_MAPCOUNT_VALUE);
 	WRITE_NUMBER("PAGE_OFFLINE_MAPCOUNT_VALUE",
 		     PAGE_OFFLINE_MAPCOUNT_VALUE);
+	WRITE_NUMBER("PAGE_UNACCEPTED_MAPCOUNT_VALUE",
+			PAGE_UNACCEPTED_MAPCOUNT_VALUE);
 	WRITE_NUMBER("phys_base", phys_base);
 	WRITE_NUMBER("KERNEL_IMAGE_SIZE", KERNEL_IMAGE_SIZE);
 
@@ -2991,6 +2992,7 @@ read_vmcoreinfo(void)
 	READ_NUMBER("PAGE_HUGETLB_MAPCOUNT_VALUE", PAGE_HUGETLB_MAPCOUNT_VALUE);
 	READ_NUMBER("PAGE_OFFLINE_MAPCOUNT_VALUE", PAGE_OFFLINE_MAPCOUNT_VALUE);
 	READ_NUMBER("PAGE_SLAB_MAPCOUNT_VALUE", PAGE_SLAB_MAPCOUNT_VALUE);
+	READ_NUMBER("PAGE_UNACCEPTED_MAPCOUNT_VALUE", PAGE_UNACCEPTED_MAPCOUNT_VALUE);
 	READ_NUMBER("phys_base", phys_base);
 	READ_NUMBER("KERNEL_IMAGE_SIZE", KERNEL_IMAGE_SIZE);
 
@@ -4445,7 +4447,7 @@ initial(void)
 #endif
 
 	if (info->flag_exclude_xen_dom && !is_xen_memory()) {
-		MSG("'-X' option is disable,");
+		MSG("'-X' option is disabled, ");
 		MSG("because %s is not Xen's memory core image.\n", info->name_memory);
 		MSG("Commandline parameter is invalid.\n");
 		MSG("Try `makedumpfile --help' for more information.\n");
@@ -4528,7 +4530,7 @@ initial(void)
 
 	if (info->flag_refiltering) {
 		if (info->flag_elf_dumpfile) {
-			MSG("'-E' option is disable, ");
+			MSG("'-E' option is disabled, ");
 			MSG("because %s is kdump compressed format.\n",
 							info->name_memory);
 			return FALSE;
@@ -4542,7 +4544,7 @@ initial(void)
 
 	} else if (info->flag_sadump) {
 		if (info->flag_elf_dumpfile) {
-			MSG("'-E' option is disable, ");
+			MSG("'-E' option is disabled, ");
 			MSG("because %s is sadump %s format.\n",
 			    info->name_memory, sadump_format_type_name());
 			return FALSE;
@@ -4636,14 +4638,14 @@ out:
 
 	if (info->num_threads) {
 		if (is_xen_memory()) {
-			MSG("'--num-threads' option is disable,\n");
+			MSG("'--num-threads' option is disabled,\n");
 			MSG("because %s is Xen's memory core image.\n",
 							info->name_memory);
 			return FALSE;
 		}
 
 		if (info->flag_sadump) {
-			MSG("'--num-threads' option is disable,\n");
+			MSG("'--num-threads' option is disabled,\n");
 			MSG("because %s is sadump %s format.\n",
 			    info->name_memory, sadump_format_type_name());
 			return FALSE;
@@ -4722,7 +4724,7 @@ out:
 			DEBUG_MSG("mmap() is available on the kernel.\n");
 			info->flag_usemmap = MMAP_ENABLE;
 		} else {
-			DEBUG_MSG("The kernel doesn't support mmap(),");
+			DEBUG_MSG("The kernel doesn't support mmap(), ");
 			DEBUG_MSG("read() will be used instead.\n");
 			info->flag_usemmap = MMAP_DISABLE;
 		}
@@ -5215,7 +5217,7 @@ exclude_nodata_pages(struct cycle *cycle)
 				   NULL, &file_size)) {
 		unsigned long long pfn, pfn_end;
 
-		pfn = paddr_to_pfn(phys_start + file_size);
+		pfn = paddr_to_pfn(roundup(phys_start + file_size, PAGESIZE()));
 		pfn_end = paddr_to_pfn(roundup(phys_end, PAGESIZE()));
 
 		if (pfn < cycle->start_pfn)
@@ -5881,7 +5883,11 @@ dump_dmesg()
 				char *first;
 
 				/* Clear everything we have already written... */
-				ftruncate(info->fd_dumpfile, 0);
+				if (ftruncate(info->fd_dumpfile, 0) != 0) {
+					ERRMSG("Can't truncate file(%s). %s\n",
+					       info->name_dumpfile, strerror(errno));
+					goto out;
+				}
 				lseek(info->fd_dumpfile, 0, SEEK_SET);
 
 				/* ...and only write up to the corruption. */
@@ -6075,12 +6081,10 @@ setup_page_is_buddy(void)
 	if (OFFSET(page.private) == NOT_FOUND_STRUCTURE)
 		goto out;
 
-	if (NUMBER(PG_buddy) == NOT_FOUND_NUMBER) {
-		if (NUMBER(PAGE_BUDDY_MAPCOUNT_VALUE) != NOT_FOUND_NUMBER) {
-			if (OFFSET(page._mapcount) != NOT_FOUND_STRUCTURE)
-				info->page_is_buddy = page_is_buddy_v3;
-		}
-	} else
+	if (NUMBER(PAGE_BUDDY_MAPCOUNT_VALUE) != NOT_FOUND_NUMBER) {
+		if (OFFSET(page._mapcount) != NOT_FOUND_STRUCTURE)
+			info->page_is_buddy = page_is_buddy_v3;
+	} else if (NUMBER(PG_buddy) != NOT_FOUND_NUMBER)
 		info->page_is_buddy = page_is_buddy_v2;
 
 out:
@@ -6547,11 +6551,10 @@ __exclude_unnecessary_pages(unsigned long mem_map,
 			 */
 			if (NUMBER(PAGE_HUGETLB_MAPCOUNT_VALUE) != NOT_FOUND_NUMBER) {
 				unsigned long _flags_1 = ULONG(addr + OFFSET(page.flags));
-				unsigned int PG_hugetlb = ~NUMBER(PAGE_HUGETLB_MAPCOUNT_VALUE);
 
 				compound_order = _flags_1 & 0xff;
 
-				if ((_mapcount & (PAGE_TYPE_BASE | PG_hugetlb)) == PAGE_TYPE_BASE)
+				if (_mapcount == (int)NUMBER(PAGE_HUGETLB_MAPCOUNT_VALUE))
 					compound_dtor = IS_HUGETLB;
 
 				goto check_order;
@@ -6628,6 +6631,17 @@ check_order:
 				continue;
 			}
 			nr_pages = 1 << private;
+			pfn_counter = &pfn_free;
+		}
+		/*
+		 * Exclude the unaccepted free pages not managed by buddy.
+		 * By convention, pages can be added to the zone.unaccepted_pages list
+		 * only when the order is MAX_PAGE_ORDER.  Otherwise, the page is
+		 * accepted immediately without being on the list.
+		 */
+		else if ((info->dump_level & DL_EXCLUDE_FREE)
+			&& isUnaccepted(_mapcount)) {
+			nr_pages = 1 << (ARRAY_LENGTH(zone.free_area) - 1);
 			pfn_counter = &pfn_free;
 		}
 		/*
@@ -8621,7 +8635,8 @@ kdump_thread_function_cyclic(void *arg) {
 
 		while (buf_ready == FALSE) {
 			pthread_testcancel();
-			if (page_flag_buf->ready == FLAG_READY)
+			if (__atomic_load_n(&page_flag_buf->ready,
+					__ATOMIC_SEQ_CST) == FLAG_READY)
 				continue;
 
 			/* get next dumpable pfn */
@@ -8637,7 +8652,8 @@ kdump_thread_function_cyclic(void *arg) {
 			info->current_pfn = pfn + 1;
 
 			page_flag_buf->pfn = pfn;
-			page_flag_buf->ready = FLAG_FILLING;
+			__atomic_store_n(&page_flag_buf->ready, FLAG_FILLING,
+					__ATOMIC_SEQ_CST);
 			pthread_mutex_unlock(&info->current_pfn_mutex);
 			sem_post(&info->page_flag_buf_sem);
 
@@ -8726,7 +8742,8 @@ kdump_thread_function_cyclic(void *arg) {
 			page_flag_buf->index = index;
 			buf_ready = TRUE;
 next:
-			page_flag_buf->ready = FLAG_READY;
+			__atomic_store_n(&page_flag_buf->ready, FLAG_READY,
+					__ATOMIC_SEQ_CST);
 			page_flag_buf = page_flag_buf->next;
 
 		}
@@ -8855,7 +8872,8 @@ write_kdump_pages_parallel_cyclic(struct cache_data *cd_header,
 			 * current_pfn is used for recording the value of pfn when checking the pfn.
 			 */
 			for (i = 0; i < info->num_threads; i++) {
-				if (info->page_flag_buf[i]->ready == FLAG_UNUSED)
+				if (__atomic_load_n(&info->page_flag_buf[i]->ready,
+						__ATOMIC_SEQ_CST) == FLAG_UNUSED)
 					continue;
 				temp_pfn = info->page_flag_buf[i]->pfn;
 
@@ -8863,7 +8881,8 @@ write_kdump_pages_parallel_cyclic(struct cache_data *cd_header,
 				 * count how many threads have reached the end.
 				 */
 				if (temp_pfn >= end_pfn) {
-					info->page_flag_buf[i]->ready = FLAG_UNUSED;
+					__atomic_store_n(&info->page_flag_buf[i]->ready,
+						FLAG_UNUSED, __ATOMIC_SEQ_CST);
 					end_count++;
 					continue;
 				}
@@ -8885,7 +8904,8 @@ write_kdump_pages_parallel_cyclic(struct cache_data *cd_header,
 			 * If the page_flag_buf is not ready, the pfn recorded may be changed.
 			 * So we should recheck.
 			 */
-			if (info->page_flag_buf[consuming]->ready != FLAG_READY) {
+			if (__atomic_load_n(&info->page_flag_buf[consuming]->ready,
+					__ATOMIC_SEQ_CST) != FLAG_READY) {
 				clock_gettime(CLOCK_MONOTONIC, &new);
 				if (new.tv_sec - last.tv_sec > WAIT_TIME) {
 					ERRMSG("Can't get data of pfn.\n");
@@ -8927,7 +8947,8 @@ write_kdump_pages_parallel_cyclic(struct cache_data *cd_header,
 				goto out;
 			page_data_buf[index].used = FALSE;
 		}
-		info->page_flag_buf[consuming]->ready = FLAG_UNUSED;
+		__atomic_store_n(&info->page_flag_buf[consuming]->ready,
+				FLAG_UNUSED, __ATOMIC_SEQ_CST);
 		info->page_flag_buf[consuming] = info->page_flag_buf[consuming]->next;
 	}
 finish:
